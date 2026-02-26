@@ -24,29 +24,17 @@ const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? "";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const DEFAULT_GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY ?? "";
 
-export default async function handler(req: IncomingMessage & { body?: unknown }, res: ServerResponse) {
+export default async function handler(
+  req: IncomingMessage & { body?: unknown },
+  res: ServerResponse,
+) {
   if (req.method !== "POST") {
     res.statusCode = 405;
     res.end("Method Not Allowed");
     return;
   }
 
-  if (!SLACK_BOT_TOKEN || !SLACK_SIGNING_SECRET || !GITHUB_TOKEN) {
-    res.statusCode = 500;
-    res.end("Missing required environment variables");
-    return;
-  }
-
   const rawBody = await readRawBody(req);
-  const signature = header(req, "x-slack-signature");
-  const timestamp = header(req, "x-slack-request-timestamp");
-
-  if (!verifySlackSignature(rawBody, signature, timestamp, SLACK_SIGNING_SECRET)) {
-    res.statusCode = 401;
-    res.end("Invalid signature");
-    return;
-  }
-
   let payload: Json;
   try {
     payload = JSON.parse(rawBody) as Json;
@@ -60,6 +48,23 @@ export default async function handler(req: IncomingMessage & { body?: unknown },
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/plain");
     res.end(String(payload.challenge ?? ""));
+    return;
+  }
+
+  if (!SLACK_BOT_TOKEN || !SLACK_SIGNING_SECRET || !GITHUB_TOKEN) {
+    res.statusCode = 500;
+    res.end("Missing required environment variables");
+    return;
+  }
+
+  const signature = header(req, "x-slack-signature");
+  const timestamp = header(req, "x-slack-request-timestamp");
+
+  if (
+    !verifySlackSignature(rawBody, signature, timestamp, SLACK_SIGNING_SECRET)
+  ) {
+    res.statusCode = 401;
+    res.end("Invalid signature");
     return;
   }
 
@@ -104,7 +109,9 @@ async function handleReactionAdded(event: Json): Promise<void> {
 
   const actor = await resolveSlackUser(slackUserId);
 
-  if (["white_check_mark", "heavy_check_mark", "check_mark"].includes(reaction)) {
+  if (
+    ["white_check_mark", "heavy_check_mark", "check_mark"].includes(reaction)
+  ) {
     await removeGithubLabel(qa, "qa:needed");
     await removeGithubLabel(qa, "qa:changes-requested");
     await addGithubLabels(qa, ["qa:approved"]);
@@ -185,7 +192,11 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       ].join("\n"),
     );
 
-    await postSlackThreadMessage(channel, threadTs, "📝 Feedback copiato nel PR e label `qa:changes-requested` applicata.");
+    await postSlackThreadMessage(
+      channel,
+      threadTs,
+      "📝 Feedback copiato nel PR e label `qa:changes-requested` applicata.",
+    );
     return;
   }
 
@@ -194,7 +205,11 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
     if (!bug) return;
 
     const issueUrl = await createBugIssue(qa, actor, bug);
-    await postSlackThreadMessage(channel, threadTs, `🐛 Issue creata: ${issueUrl}`);
+    await postSlackThreadMessage(
+      channel,
+      threadTs,
+      `🐛 Issue creata: ${issueUrl}`,
+    );
   }
 }
 
@@ -213,7 +228,10 @@ function verifySlackSignature(
   }
 
   const base = `v0:${timestamp}:${rawBody}`;
-  const digest = crypto.createHmac("sha256", signingSecret).update(base).digest("hex");
+  const digest = crypto
+    .createHmac("sha256", signingSecret)
+    .update(base)
+    .digest("hex");
   const expected = `v0=${digest}`;
 
   const a = Buffer.from(expected, "utf8");
@@ -223,7 +241,10 @@ function verifySlackSignature(
   return crypto.timingSafeEqual(a, b);
 }
 
-async function fetchSlackParentMessage(channel: string, ts: string): Promise<{ text?: string } | null> {
+async function fetchSlackParentMessage(
+  channel: string,
+  ts: string,
+): Promise<{ text?: string } | null> {
   const response = await slackApi("conversations.replies", {
     channel,
     ts,
@@ -240,7 +261,11 @@ async function fetchSlackParentMessage(channel: string, ts: string): Promise<{ t
   };
 }
 
-async function postSlackThreadMessage(channel: string, threadTs: string, text: string): Promise<void> {
+async function postSlackThreadMessage(
+  channel: string,
+  threadTs: string,
+  text: string,
+): Promise<void> {
   await slackApi("chat.postMessage", {
     channel,
     thread_ts: threadTs,
@@ -254,7 +279,9 @@ async function resolveSlackUser(userId: string): Promise<string> {
   try {
     const response = await slackApi("users.info", { user: userId });
     const user = (response.user ?? {}) as Json;
-    return String((user.profile as Json | undefined)?.display_name || user.name || userId);
+    return String(
+      (user.profile as Json | undefined)?.display_name || user.name || userId,
+    );
   } catch {
     return userId;
   }
@@ -267,7 +294,9 @@ function extractQaContext(text: string): QaContext | null {
   const prNumber = Number(prMatch[1]);
   if (!Number.isFinite(prNumber)) return null;
 
-  const prUrlMatch = text.match(/https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i);
+  const prUrlMatch = text.match(
+    /https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i,
+  );
 
   let owner = "";
   let repo = "";
@@ -308,17 +337,23 @@ function extractQaContext(text: string): QaContext | null {
 }
 
 async function addGithubLabels(qa: QaContext, labels: string[]): Promise<void> {
-  await githubApi(`/repos/${qa.owner}/${qa.repo}/issues/${qa.prNumber}/labels`, {
-    method: "POST",
-    body: { labels },
-  });
+  await githubApi(
+    `/repos/${qa.owner}/${qa.repo}/issues/${qa.prNumber}/labels`,
+    {
+      method: "POST",
+      body: { labels },
+    },
+  );
 }
 
 async function removeGithubLabel(qa: QaContext, name: string): Promise<void> {
   try {
-    await githubApi(`/repos/${qa.owner}/${qa.repo}/issues/${qa.prNumber}/labels/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-    });
+    await githubApi(
+      `/repos/${qa.owner}/${qa.repo}/issues/${qa.prNumber}/labels/${encodeURIComponent(name)}`,
+      {
+        method: "DELETE",
+      },
+    );
   } catch (error) {
     if (error instanceof Error && error.message.includes("404")) {
       return;
@@ -328,13 +363,20 @@ async function removeGithubLabel(qa: QaContext, name: string): Promise<void> {
 }
 
 async function createPrComment(qa: QaContext, body: string): Promise<void> {
-  await githubApi(`/repos/${qa.owner}/${qa.repo}/issues/${qa.prNumber}/comments`, {
-    method: "POST",
-    body: { body },
-  });
+  await githubApi(
+    `/repos/${qa.owner}/${qa.repo}/issues/${qa.prNumber}/comments`,
+    {
+      method: "POST",
+      body: { body },
+    },
+  );
 }
 
-async function createBugIssue(qa: QaContext, actor: string, bugDescription: string): Promise<string> {
+async function createBugIssue(
+  qa: QaContext,
+  actor: string,
+  bugDescription: string,
+): Promise<string> {
   const title = `🐛 QA bug - PR #${qa.prNumber} (${qa.app})`;
   const body = [
     `Segnalato da: @${actor}`,
@@ -345,7 +387,9 @@ async function createBugIssue(qa: QaContext, actor: string, bugDescription: stri
     qa.iosBuildId ? `iOS Build ID: ${qa.iosBuildId}` : null,
     qa.androidBuildId ? `Android Build ID: ${qa.androidBuildId}` : null,
     qa.iosUpdateGroupId ? `iOS Update Group ID: ${qa.iosUpdateGroupId}` : null,
-    qa.androidUpdateGroupId ? `Android Update Group ID: ${qa.androidUpdateGroupId}` : null,
+    qa.androidUpdateGroupId
+      ? `Android Update Group ID: ${qa.androidUpdateGroupId}`
+      : null,
     qa.runtimeIos ? `Runtime iOS: ${qa.runtimeIos}` : null,
     qa.runtimeAndroid ? `Runtime Android: ${qa.runtimeAndroid}` : null,
     "",
@@ -399,13 +443,18 @@ async function slackApi(method: string, body: Json): Promise<Json> {
 
   const data = (await response.json()) as Json;
   if (!data.ok) {
-    throw new Error(`Slack API ${method} error: ${String(data.error ?? "unknown")}`);
+    throw new Error(
+      `Slack API ${method} error: ${String(data.error ?? "unknown")}`,
+    );
   }
 
   return data;
 }
 
-async function githubApi(path: string, init: { method: string; body?: Json }): Promise<Json> {
+async function githubApi(
+  path: string,
+  init: { method: string; body?: Json },
+): Promise<Json> {
   const response = await fetch(`https://api.github.com${path}`, {
     method: init.method,
     headers: {
@@ -424,13 +473,17 @@ async function githubApi(path: string, init: { method: string; body?: Json }): P
   const data = (await response.json()) as Json;
 
   if (!response.ok) {
-    throw new Error(`GitHub API ${path} failed (${response.status}): ${JSON.stringify(data)}`);
+    throw new Error(
+      `GitHub API ${path} failed (${response.status}): ${JSON.stringify(data)}`,
+    );
   }
 
   return data;
 }
 
-async function readRawBody(req: IncomingMessage & { body?: unknown }): Promise<string> {
+async function readRawBody(
+  req: IncomingMessage & { body?: unknown },
+): Promise<string> {
   if (typeof req.body === "string") {
     return req.body;
   }
