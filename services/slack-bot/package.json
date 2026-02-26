@@ -1,0 +1,11 @@
+{
+  "name": "@ergon-ai/slack-bot",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.21.0"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  }
+}
