@@ -39,12 +39,10 @@ export default async function handler(
   try {
     payload = JSON.parse(rawBody) as Json;
   } catch {
-    res.statusCode = 400;
-    res.end("Invalid JSON payload");
-    return;
+    payload = parseFormPayload(rawBody) ?? {};
   }
 
-  if (payload.type === "url_verification") {
+  if (typeof payload.challenge === "string") {
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/plain");
     res.end(String(payload.challenge ?? ""));
@@ -503,4 +501,29 @@ function header(req: IncomingMessage, name: string): string {
   const value = req.headers[name];
   if (Array.isArray(value)) return value[0] ?? "";
   return value ?? "";
+}
+
+function parseFormPayload(rawBody: string): Json | null {
+  try {
+    const params = new URLSearchParams(rawBody);
+
+    const embeddedPayload = params.get("payload");
+    if (embeddedPayload) {
+      return JSON.parse(embeddedPayload) as Json;
+    }
+
+    const challenge = params.get("challenge");
+    const type = params.get("type");
+
+    if (challenge || type) {
+      return {
+        challenge,
+        type,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
