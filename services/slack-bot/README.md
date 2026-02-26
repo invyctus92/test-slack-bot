@@ -1,21 +1,31 @@
-# Slack Bot Service (Vercel Project Separato)
+# Slack Bot Service (Next.js)
 
-Questo servizio espone l'endpoint Slack Events per sincronizzare QA Slack -> GitHub.
+Servizio Next.js che espone l'endpoint Slack Events per sincronizzare QA Slack -> GitHub.
 
 Endpoint:
 
 - `/api/slack/events`
 
-Codice handler:
+Handler:
 
-- `services/slack-bot/api/slack/events.ts`
+- `services/slack-bot/app/api/slack/events/route.ts`
 
-## Deploy consigliato
+## Avvio locale
+
+1. Vai nella cartella `services/slack-bot`.
+2. Installa dipendenze: `npm install`.
+3. Avvia in dev: `npm run dev`.
+
+URL locale:
+
+- `http://localhost:3000/api/slack/events`
+
+## Deploy consigliato su Vercel
 
 1. Crea un nuovo progetto su Vercel.
 2. Collega questo repository.
 3. Imposta `Root Directory` a `services/slack-bot`.
-4. Framework Preset: `Other`.
+4. Framework Preset: `Next.js`.
 5. Deploy.
 
 URL finale atteso:

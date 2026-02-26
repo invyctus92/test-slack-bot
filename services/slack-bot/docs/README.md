@@ -4,6 +4,8 @@ Serverless endpoint for Slack -> GitHub QA actions.
 
 Path: `/api/slack/events`
 
+Source: `app/api/slack/events/route.ts`
+
 Environment variables:
 
 - `SLACK_BOT_TOKEN`
