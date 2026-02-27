@@ -85,7 +85,7 @@ async function handleReactionAdded(event: Json): Promise<void> {
   const slackUserId = String(event.user ?? "");
   if (!channel || !ts || !reaction) return;
 
-  const parent = await fetchSlackParentMessage(channel, ts);
+  const parent = await fetchSlackParentMessageWithJoin(channel, ts);
   if (!parent?.text) return;
 
   const qa = extractQaContext(parent.text);
@@ -149,7 +149,7 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
 
   if (!threadTs || !channel || !text || !slackUserId) return;
 
-  const parent = await fetchSlackParentMessage(channel, threadTs);
+  const parent = await fetchSlackParentMessageWithJoin(channel, threadTs);
   if (!parent?.text) return;
 
   const qa = extractQaContext(parent.text);
@@ -243,6 +243,28 @@ async function fetchSlackParentMessage(
   return {
     text: String(parent.text ?? ""),
   };
+}
+
+async function fetchSlackParentMessageWithJoin(
+  channel: string,
+  ts: string,
+): Promise<{ text?: string } | null> {
+  try {
+    return await fetchSlackParentMessage(channel, ts);
+  } catch (error) {
+    if (!isNotInChannelError(error)) throw error;
+
+    await joinPublicChannel(channel);
+    return fetchSlackParentMessage(channel, ts);
+  }
+}
+
+function isNotInChannelError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("not_in_channel");
+}
+
+async function joinPublicChannel(channel: string): Promise<void> {
+  await slackApi("conversations.join", { channel });
 }
 
 async function postSlackThreadMessage(
