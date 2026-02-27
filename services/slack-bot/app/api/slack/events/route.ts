@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 
 type Json = Record<string, unknown>;
+type GithubRepoRef = { owner: string; repo: string };
+type GithubInstallationTokenCacheEntry = {
+  token: string;
+  expiresAtMs: number;
+};
 
 type QaContext = {
   app: string;
@@ -20,14 +25,30 @@ type QaContext = {
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN ?? "";
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? "";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
+const GITHUB_APP_ID = (process.env.GITHUB_APP_ID ?? "").trim();
+const GITHUB_APP_PRIVATE_KEY = (
+  process.env.GITHUB_APP_PRIVATE_KEY ?? ""
+).replace(/\\n/g, "\n");
+const GITHUB_APP_INSTALLATION_ID = (
+  process.env.GITHUB_APP_INSTALLATION_ID ?? ""
+).trim();
 const DEFAULT_GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY ?? "";
+const GITHUB_API_VERSION = "2022-11-28";
+const githubInstallationTokenCache = new Map<
+  string,
+  GithubInstallationTokenCacheEntry
+>();
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function POST(req: Request): Promise<Response> {
-  if (!SLACK_BOT_TOKEN || !SLACK_SIGNING_SECRET || !GITHUB_TOKEN) {
+  if (
+    !SLACK_BOT_TOKEN ||
+    !SLACK_SIGNING_SECRET ||
+    !GITHUB_APP_ID ||
+    !GITHUB_APP_PRIVATE_KEY
+  ) {
     return new Response("Missing required environment variables", {
       status: 500,
     });
@@ -461,12 +482,14 @@ async function githubApi(
   path: string,
   init: { method: string; body?: Json },
 ): Promise<Json> {
+  const installationToken = await getGithubInstallationTokenForPath(path);
   const response = await fetch(`https://api.github.com${path}`, {
     method: init.method,
     headers: {
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Authorization: `Bearer ${installationToken}`,
       "Content-Type": "application/json",
       Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": GITHUB_API_VERSION,
       "User-Agent": "ergon-mobile-slack-bot",
     },
     body: init.body ? JSON.stringify(init.body) : undefined,
@@ -481,6 +504,126 @@ async function githubApi(
   if (!response.ok) {
     throw new Error(
       `GitHub API ${path} failed (${response.status}): ${JSON.stringify(data)}`,
+    );
+  }
+
+  return data;
+}
+
+async function getGithubInstallationTokenForPath(path: string): Promise<string> {
+  const installationId = await resolveGithubInstallationId(path);
+  const now = Date.now();
+  const cached = githubInstallationTokenCache.get(installationId);
+  if (cached && cached.expiresAtMs - 30_000 > now) {
+    return cached.token;
+  }
+
+  const jwt = createGithubAppJwt();
+  const tokenResponse = await githubAppApi(
+    `/app/installations/${installationId}/access_tokens`,
+    {
+      method: "POST",
+      jwt,
+    },
+  );
+
+  const token = String(tokenResponse.token ?? "");
+  const expiresAt = String(tokenResponse.expires_at ?? "");
+  const expiresAtMs = Date.parse(expiresAt);
+
+  if (!token || !Number.isFinite(expiresAtMs)) {
+    throw new Error("GitHub App access token response is invalid");
+  }
+
+  githubInstallationTokenCache.set(installationId, { token, expiresAtMs });
+  return token;
+}
+
+async function resolveGithubInstallationId(path: string): Promise<string> {
+  if (GITHUB_APP_INSTALLATION_ID) {
+    return GITHUB_APP_INSTALLATION_ID;
+  }
+
+  const repo = extractRepoFromGithubPath(path);
+  if (!repo) {
+    throw new Error(
+      `Cannot resolve GitHub App installation id for path without repository: ${path}`,
+    );
+  }
+
+  const jwt = createGithubAppJwt();
+  const installation = await githubAppApi(
+    `/repos/${repo.owner}/${repo.repo}/installation`,
+    {
+      method: "GET",
+      jwt,
+    },
+  );
+
+  const installationId = String(installation.id ?? "");
+  if (!installationId) {
+    throw new Error(
+      `GitHub App installation not found for ${repo.owner}/${repo.repo}`,
+    );
+  }
+
+  return installationId;
+}
+
+function extractRepoFromGithubPath(path: string): GithubRepoRef | null {
+  const match = path.match(/^\/repos\/([^/]+)\/([^/]+)(?:\/|$)/);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2] };
+}
+
+function createGithubAppJwt(): string {
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const payload = {
+    iat: now - 60,
+    exp: now + 9 * 60,
+    iss: GITHUB_APP_ID,
+  };
+  const unsignedToken = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(payload))}`;
+  const signature = crypto
+    .createSign("RSA-SHA256")
+    .update(unsignedToken)
+    .sign(GITHUB_APP_PRIVATE_KEY);
+  return `${unsignedToken}.${base64UrlEncode(signature)}`;
+}
+
+function base64UrlEncode(input: string | Buffer): string {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+async function githubAppApi(
+  path: string,
+  init: { method: string; jwt: string; body?: Json },
+): Promise<Json> {
+  const response = await fetch(`https://api.github.com${path}`, {
+    method: init.method,
+    headers: {
+      Authorization: `Bearer ${init.jwt}`,
+      "Content-Type": "application/json",
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": GITHUB_API_VERSION,
+      "User-Agent": "ergon-mobile-slack-bot",
+    },
+    body: init.body ? JSON.stringify(init.body) : undefined,
+  });
+
+  if (response.status === 204) {
+    return {};
+  }
+
+  const data = (await response.json()) as Json;
+  if (!response.ok) {
+    throw new Error(
+      `GitHub App API ${path} failed (${response.status}): ${JSON.stringify(data)}`,
     );
   }
 

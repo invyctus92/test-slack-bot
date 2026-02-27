@@ -10,7 +10,9 @@ Environment variables:
 
 - `SLACK_BOT_TOKEN`
 - `SLACK_SIGNING_SECRET`
-- `GITHUB_TOKEN`
+- `GITHUB_APP_ID`
+- `GITHUB_APP_PRIVATE_KEY`
+- `GITHUB_APP_INSTALLATION_ID` (optional, recommended)
 - `GITHUB_REPOSITORY` (optional fallback, format `owner/repo`)
 
 Supported actions:

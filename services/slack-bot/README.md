@@ -36,7 +36,9 @@ URL finale atteso:
 
 - `SLACK_BOT_TOKEN`
 - `SLACK_SIGNING_SECRET`
-- `GITHUB_TOKEN`
+- `GITHUB_APP_ID`
+- `GITHUB_APP_PRIVATE_KEY` (chiave PEM della GitHub App; se salvata su una singola riga usa `\n` per i newline)
+- `GITHUB_APP_INSTALLATION_ID` (opzionale, consigliata per evitare lookup runtime)
 - `GITHUB_REPOSITORY` (opzionale, formato `owner/repo`)
 
 ## Config Slack App
@@ -60,10 +62,12 @@ Se usi anche webhook in GitHub Actions, mantieni pure:
 
 - `incoming-webhook`
 
-## Permessi consigliati per `GITHUB_TOKEN` del bot
+## Permessi consigliati per GitHub App
 
-PAT fine-grained con accesso al repository target:
+Repository permissions della GitHub App:
 
 - Issues: Read and write
 - Pull requests: Read and write
 - Metadata: Read-only
+
+Installa la GitHub App sul repository target. Il bot genera JWT dell'app e usa un installation access token per ogni chiamata API.
