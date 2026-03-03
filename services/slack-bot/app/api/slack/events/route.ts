@@ -600,6 +600,56 @@ function normalizeGithubAppPrivateKey(raw: string): string {
   return withNewlines;
 }
 
+function extractPemBlock(
+  value: string,
+): { label: string; body: string } | null {
+  const match = value.match(
+    /-----BEGIN ([A-Z0-9 ]+)-----([\s\S]*?)-----END \1-----/m,
+  );
+  if (!match) return null;
+  return { label: match[1].trim(), body: match[2] ?? "" };
+}
+
+function canonicalizePem(value: string): string {
+  const pemBlock = extractPemBlock(value);
+  if (!pemBlock) return value;
+
+  if (
+    /Proc-Type:\s*4,\s*ENCRYPTED/i.test(pemBlock.body) ||
+    /DEK-Info:/i.test(pemBlock.body)
+  ) {
+    throw new Error(
+      "Encrypted PEM detected in GITHUB_APP_PRIVATE_KEY. Use the unencrypted private key downloaded from GitHub App settings.",
+    );
+  }
+
+  const base64Body = pemBlock.body
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => /^[A-Za-z0-9+/=]+$/.test(line))
+    .join("");
+
+  if (!base64Body) return value;
+
+  const wrappedBody = base64Body.match(/.{1,64}/g)?.join("\n") ?? base64Body;
+  return `-----BEGIN ${pemBlock.label}-----\n${wrappedBody}\n-----END ${pemBlock.label}-----`;
+}
+
+function decodePemBodyBase64(value: string): Buffer | null {
+  const pemBlock = extractPemBlock(value);
+  if (!pemBlock) return null;
+
+  const compactBody = pemBlock.body.replace(/[^A-Za-z0-9+/=]/g, "");
+  if (!compactBody) return null;
+
+  try {
+    return Buffer.from(compactBody, "base64");
+  } catch {
+    return null;
+  }
+}
+
 function decodeBase64Variants(input: string): Buffer[] {
   const compact = input.replace(/\s+/g, "");
   if (!compact) return [];
@@ -661,9 +711,28 @@ function getGithubAppPrivateKey(): crypto.KeyObject {
     throw new Error("GITHUB_APP_PRIVATE_KEY is empty");
   }
 
+  const canonicalPem = canonicalizePem(normalizedKey);
+  const canonicalPemBlock = extractPemBlock(canonicalPem);
   const candidates: Array<() => crypto.KeyObject> = [
     () => parseKeyFromPemValue(normalizedKey),
+    () => parseKeyFromPemValue(canonicalPem),
   ];
+
+  if (canonicalPemBlock) {
+    const pemBodyDer = decodePemBodyBase64(canonicalPem);
+    if (pemBodyDer) {
+      if (canonicalPemBlock.label === "RSA PRIVATE KEY") {
+        candidates.push(() => parseKeyFromDerValue(pemBodyDer, "pkcs1"));
+      }
+
+      if (
+        canonicalPemBlock.label === "PRIVATE KEY" ||
+        canonicalPemBlock.label === "ENCRYPTED PRIVATE KEY"
+      ) {
+        candidates.push(() => parseKeyFromDerValue(pemBodyDer, "pkcs8"));
+      }
+    }
+  }
 
   const decodedVariants = decodeBase64Variants(normalizedKey);
   for (const decoded of decodedVariants) {
