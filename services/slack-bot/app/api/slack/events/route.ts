@@ -26,14 +26,13 @@ type QaContext = {
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN ?? "";
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? "";
 const GITHUB_APP_ID = (process.env.GITHUB_APP_ID ?? "").trim();
-const GITHUB_APP_PRIVATE_KEY = (
-  process.env.GITHUB_APP_PRIVATE_KEY ?? ""
-).replace(/\\n/g, "\n");
+const GITHUB_APP_PRIVATE_KEY_RAW = process.env.GITHUB_APP_PRIVATE_KEY ?? "";
 const GITHUB_APP_INSTALLATION_ID = (
   process.env.GITHUB_APP_INSTALLATION_ID ?? ""
 ).trim();
 const DEFAULT_GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY ?? "";
 const GITHUB_API_VERSION = "2022-11-28";
+let githubAppPrivateKey: crypto.KeyObject | null = null;
 const githubInstallationTokenCache = new Map<
   string,
   GithubInstallationTokenCacheEntry
@@ -47,7 +46,7 @@ export async function POST(req: Request): Promise<Response> {
     !SLACK_BOT_TOKEN ||
     !SLACK_SIGNING_SECRET ||
     !GITHUB_APP_ID ||
-    !GITHUB_APP_PRIVATE_KEY
+    !GITHUB_APP_PRIVATE_KEY_RAW
   ) {
     return new Response("Missing required environment variables", {
       status: 500,
@@ -579,6 +578,71 @@ function extractRepoFromGithubPath(path: string): GithubRepoRef | null {
   return { owner: match[1], repo: match[2] };
 }
 
+function normalizeGithubAppPrivateKey(raw: string): string {
+  const trimmed = raw.trim().replace(/\r\n/g, "\n");
+  if (!trimmed) return "";
+
+  const withoutQuotes =
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+      ? trimmed.slice(1, -1)
+      : trimmed;
+
+  const withNewlines = withoutQuotes.replace(/\\n/g, "\n");
+  if (withNewlines.includes("BEGIN") && withNewlines.includes("PRIVATE KEY")) {
+    return withNewlines;
+  }
+
+  const compact = withNewlines.replace(/\s+/g, "");
+  if (/^[A-Za-z0-9+/=]+$/.test(compact)) {
+    try {
+      const decoded = Buffer.from(compact, "base64")
+        .toString("utf8")
+        .trim()
+        .replace(/\r\n/g, "\n");
+      if (decoded.includes("BEGIN") && decoded.includes("PRIVATE KEY")) {
+        return decoded;
+      }
+    } catch {
+      // Fall through to return original value.
+    }
+  }
+
+  return withNewlines;
+}
+
+function getGithubAppPrivateKey(): crypto.KeyObject {
+  if (githubAppPrivateKey) return githubAppPrivateKey;
+
+  const normalizedKey = normalizeGithubAppPrivateKey(
+    GITHUB_APP_PRIVATE_KEY_RAW,
+  );
+  if (!normalizedKey) {
+    throw new Error("GITHUB_APP_PRIVATE_KEY is empty");
+  }
+
+  try {
+    const key = crypto.createPrivateKey({
+      key: normalizedKey,
+      format: "pem",
+    });
+
+    if (key.asymmetricKeyType !== "rsa") {
+      throw new Error(
+        `GITHUB_APP_PRIVATE_KEY must be an RSA private key, received ${String(key.asymmetricKeyType ?? "unknown")}`,
+      );
+    }
+
+    githubAppPrivateKey = key;
+    return key;
+  } catch (error) {
+    throw new Error(
+      "Invalid GITHUB_APP_PRIVATE_KEY format. Provide a PEM private key (-----BEGIN ... PRIVATE KEY-----) or a base64-encoded PEM. If the value is single-line, keep \\n between lines.",
+      { cause: error },
+    );
+  }
+}
+
 function createGithubAppJwt(): string {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
@@ -588,10 +652,11 @@ function createGithubAppJwt(): string {
     iss: GITHUB_APP_ID,
   };
   const unsignedToken = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(payload))}`;
+  const privateKey = getGithubAppPrivateKey();
   const signature = crypto
     .createSign("RSA-SHA256")
     .update(unsignedToken)
-    .sign(GITHUB_APP_PRIVATE_KEY);
+    .sign(privateKey);
   return `${unsignedToken}.${base64UrlEncode(signature)}`;
 }
 
