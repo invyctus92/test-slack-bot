@@ -315,15 +315,16 @@ async function resolveSlackUser(userId: string): Promise<string> {
 }
 
 function extractQaContext(text: string): QaContext | null {
-  const prMatch = text.match(/PR #(\d+)/i);
-  if (!prMatch) return null;
-
-  const prNumber = Number(prMatch[1]);
-  if (!Number.isFinite(prNumber)) return null;
-
   const prUrlMatch = text.match(
-    /https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i,
+    /https:\/\/github\.com\/([^/\s>]+)\/([^/\s>]+)\/pull\/(\d+)/i,
   );
+  const prMatch = text.match(/PR\s*#\s*(\d+)/i);
+  const prMarkerMatch = text.match(/ERGO_QA_PR_NUMBER\s*=\s*(\d+)/i);
+
+  const prNumber = Number(
+    prMatch?.[1] ?? prMarkerMatch?.[1] ?? prUrlMatch?.[3] ?? NaN,
+  );
+  if (!Number.isFinite(prNumber)) return null;
 
   let owner = "";
   let repo = "";
@@ -510,7 +511,9 @@ async function githubApi(
   return data;
 }
 
-async function getGithubInstallationTokenForPath(path: string): Promise<string> {
+async function getGithubInstallationTokenForPath(
+  path: string,
+): Promise<string> {
   const installationId = await resolveGithubInstallationId(path);
   const now = Date.now();
   const cached = githubInstallationTokenCache.get(installationId);
