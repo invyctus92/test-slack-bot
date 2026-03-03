@@ -584,31 +584,71 @@ function normalizeGithubAppPrivateKey(raw: string): string {
 
   const withoutQuotes =
     (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+    (trimmed.startsWith("`") && trimmed.endsWith("`"))
       ? trimmed.slice(1, -1)
       : trimmed;
 
-  const withNewlines = withoutQuotes.replace(/\\n/g, "\n");
+  const withNewlines = withoutQuotes
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\u000a/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\r\n/g, "\n");
   if (withNewlines.includes("BEGIN") && withNewlines.includes("PRIVATE KEY")) {
     return withNewlines;
   }
+  return withNewlines;
+}
 
-  const compact = withNewlines.replace(/\s+/g, "");
+function decodeBase64Variants(input: string): Buffer[] {
+  const compact = input.replace(/\s+/g, "");
+  if (!compact) return [];
+
+  const variants = new Set<string>();
+
   if (/^[A-Za-z0-9+/=]+$/.test(compact)) {
+    variants.add(compact);
+  }
+
+  if (/^[A-Za-z0-9\-_]+$/.test(compact)) {
+    const padded = compact.padEnd(Math.ceil(compact.length / 4) * 4, "=");
+    variants.add(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  }
+
+  const decodedBuffers: Buffer[] = [];
+  const seen = new Set<string>();
+  for (const encoded of variants) {
     try {
-      const decoded = Buffer.from(compact, "base64")
-        .toString("utf8")
-        .trim()
-        .replace(/\r\n/g, "\n");
-      if (decoded.includes("BEGIN") && decoded.includes("PRIVATE KEY")) {
-        return decoded;
-      }
+      const decoded = Buffer.from(encoded, "base64");
+      if (!decoded.length) continue;
+      const fingerprint = decoded.toString("base64");
+      if (seen.has(fingerprint)) continue;
+      seen.add(fingerprint);
+      decodedBuffers.push(decoded);
     } catch {
-      // Fall through to return original value.
+      // Ignore invalid base64 candidate.
     }
   }
 
-  return withNewlines;
+  return decodedBuffers;
+}
+
+function parseKeyFromPemValue(value: string): crypto.KeyObject {
+  return crypto.createPrivateKey({
+    key: value,
+    format: "pem",
+  });
+}
+
+function parseKeyFromDerValue(
+  value: Buffer,
+  type: "pkcs1" | "pkcs8",
+): crypto.KeyObject {
+  return crypto.createPrivateKey({
+    key: value,
+    format: "der",
+    type,
+  });
 }
 
 function getGithubAppPrivateKey(): crypto.KeyObject {
@@ -621,26 +661,53 @@ function getGithubAppPrivateKey(): crypto.KeyObject {
     throw new Error("GITHUB_APP_PRIVATE_KEY is empty");
   }
 
-  try {
-    const key = crypto.createPrivateKey({
-      key: normalizedKey,
-      format: "pem",
-    });
+  const candidates: Array<() => crypto.KeyObject> = [
+    () => parseKeyFromPemValue(normalizedKey),
+  ];
 
-    if (key.asymmetricKeyType !== "rsa") {
-      throw new Error(
-        `GITHUB_APP_PRIVATE_KEY must be an RSA private key, received ${String(key.asymmetricKeyType ?? "unknown")}`,
-      );
+  const decodedVariants = decodeBase64Variants(normalizedKey);
+  for (const decoded of decodedVariants) {
+    const decodedAsText = decoded
+      .toString("utf8")
+      .trim()
+      .replace(/\r\n/g, "\n");
+    if (
+      decodedAsText.includes("BEGIN") &&
+      decodedAsText.includes("PRIVATE KEY")
+    ) {
+      candidates.push(() => parseKeyFromPemValue(decodedAsText));
     }
 
-    githubAppPrivateKey = key;
-    return key;
-  } catch (error) {
-    throw new Error(
-      "Invalid GITHUB_APP_PRIVATE_KEY format. Provide a PEM private key (-----BEGIN ... PRIVATE KEY-----) or a base64-encoded PEM. If the value is single-line, keep \\n between lines.",
-      { cause: error },
-    );
+    candidates.push(() => parseKeyFromDerValue(decoded, "pkcs1"));
+    candidates.push(() => parseKeyFromDerValue(decoded, "pkcs8"));
   }
+
+  const errors: string[] = [];
+  for (const parseCandidate of candidates) {
+    try {
+      const key = parseCandidate();
+      if (key.asymmetricKeyType !== "rsa") {
+        throw new Error(
+          `GITHUB_APP_PRIVATE_KEY must be an RSA private key, received ${String(key.asymmetricKeyType ?? "unknown")}`,
+        );
+      }
+
+      githubAppPrivateKey = key;
+      return key;
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  const normalizedHeader = normalizedKey.match(/-----BEGIN ([^-]+)-----/)?.[1];
+  const headerHint = normalizedHeader
+    ? ` Detected header: ${normalizedHeader}.`
+    : "";
+
+  throw new Error(
+    `Invalid GITHUB_APP_PRIVATE_KEY format.${headerHint} Provide the GitHub App private key (RSA PEM), or base64/base64url of that PEM. If single-line, preserve line breaks with \\n.`,
+    { cause: new Error(errors[0] ?? "Unsupported key encoding") },
+  );
 }
 
 function createGithubAppJwt(): string {
