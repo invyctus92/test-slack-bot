@@ -7,6 +7,34 @@ type GithubInstallationTokenCacheEntry = {
   expiresAtMs: number;
 };
 
+class SlackApiError extends Error {
+  readonly method: string;
+  readonly status: number;
+  readonly code: string;
+
+  constructor(method: string, status: number, code: string, data?: Json) {
+    super(
+      `Slack API ${method} error (${status}): ${code}${data ? `: ${JSON.stringify(data)}` : ""}`,
+    );
+    this.name = "SlackApiError";
+    this.method = method;
+    this.status = status;
+    this.code = code;
+  }
+}
+
+class GithubAppApiError extends Error {
+  readonly status: number;
+  readonly path: string;
+
+  constructor(path: string, status: number, data: Json) {
+    super(`GitHub App API ${path} failed (${status}): ${JSON.stringify(data)}`);
+    this.name = "GithubAppApiError";
+    this.status = status;
+    this.path = path;
+  }
+}
+
 type QaContext = {
   app: string;
   prNumber: number;
@@ -104,6 +132,7 @@ async function handleReactionAdded(event: Json): Promise<void> {
   const ts = String(item.ts ?? "");
   const slackUserId = String(event.user ?? "");
   if (!channel || !ts || !reaction) return;
+  if (!channel.startsWith("C")) return;
 
   const parent = await fetchSlackParentMessageWithJoin(channel, ts);
   if (!parent?.text) return;
@@ -272,15 +301,44 @@ async function fetchSlackParentMessageWithJoin(
   try {
     return await fetchSlackParentMessage(channel, ts);
   } catch (error) {
-    if (!isNotInChannelError(error)) throw error;
+    if (isNotInChannelError(error)) {
+      try {
+        await joinPublicChannel(channel);
+        return await fetchSlackParentMessage(channel, ts);
+      } catch (retryError) {
+        if (isChannelUnavailableError(retryError)) {
+          console.warn(
+            `Slack channel unavailable while fetching parent message for ${channel}: ${String((retryError as Error).message ?? retryError)}`,
+          );
+          return null;
+        }
+        throw retryError;
+      }
+    }
 
-    await joinPublicChannel(channel);
-    return fetchSlackParentMessage(channel, ts);
+    if (isChannelUnavailableError(error)) {
+      console.warn(
+        `Slack channel unavailable while fetching parent message for ${channel}: ${String((error as Error).message ?? error)}`,
+      );
+      return null;
+    }
+
+    throw error;
   }
 }
 
 function isNotInChannelError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("not_in_channel");
+  return error instanceof SlackApiError && error.code === "not_in_channel";
+}
+
+function isChannelUnavailableError(error: unknown): boolean {
+  if (!(error instanceof SlackApiError)) return false;
+  return [
+    "channel_not_found",
+    "is_archived",
+    "not_in_channel",
+    "method_not_supported_for_channel_type",
+  ].includes(error.code);
 }
 
 async function joinPublicChannel(channel: string): Promise<void> {
@@ -464,14 +522,28 @@ async function slackApi(method: string, body: Json): Promise<Json> {
     body: JSON.stringify(body),
   });
 
-  if (!response.ok) {
-    throw new Error(`Slack API ${method} failed (${response.status})`);
+  let data: Json = {};
+  try {
+    data = (await response.json()) as Json;
+  } catch {
+    data = {};
   }
 
-  const data = (await response.json()) as Json;
+  if (!response.ok) {
+    throw new SlackApiError(
+      method,
+      response.status,
+      String(data.error ?? `http_${response.status}`),
+      data,
+    );
+  }
+
   if (!data.ok) {
-    throw new Error(
-      `Slack API ${method} error: ${String(data.error ?? "unknown")}`,
+    throw new SlackApiError(
+      method,
+      response.status,
+      String(data.error ?? "unknown"),
+      data,
     );
   }
 
@@ -514,6 +586,41 @@ async function getGithubInstallationTokenForPath(
   path: string,
 ): Promise<string> {
   const installationId = await resolveGithubInstallationId(path);
+  try {
+    return await getGithubInstallationTokenById(installationId);
+  } catch (error) {
+    const repo = extractRepoFromGithubPath(path);
+    const canRetryWithResolvedInstallation =
+      Boolean(GITHUB_APP_INSTALLATION_ID) &&
+      installationId === GITHUB_APP_INSTALLATION_ID &&
+      Boolean(repo) &&
+      error instanceof GithubAppApiError &&
+      error.status === 404;
+
+    if (!canRetryWithResolvedInstallation || !repo) {
+      throw error;
+    }
+
+    const resolvedInstallationId =
+      await resolveGithubInstallationIdForRepo(repo);
+    if (resolvedInstallationId === installationId) {
+      throw new Error(
+        [
+          `GitHub App installation ${installationId} returned 404.`,
+          `Ensure GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY belong to the same app installation for ${repo.owner}/${repo.repo},`,
+          "or unset GITHUB_APP_INSTALLATION_ID to let the bot resolve it dynamically.",
+        ].join(" "),
+        { cause: error },
+      );
+    }
+
+    return getGithubInstallationTokenById(resolvedInstallationId);
+  }
+}
+
+async function getGithubInstallationTokenById(
+  installationId: string,
+): Promise<string> {
   const now = Date.now();
   const cached = githubInstallationTokenCache.get(installationId);
   if (cached && cached.expiresAtMs - 30_000 > now) {
@@ -553,6 +660,12 @@ async function resolveGithubInstallationId(path: string): Promise<string> {
     );
   }
 
+  return resolveGithubInstallationIdForRepo(repo);
+}
+
+async function resolveGithubInstallationIdForRepo(
+  repo: GithubRepoRef,
+): Promise<string> {
   const jwt = createGithubAppJwt();
   const installation = await githubAppApi(
     `/repos/${repo.owner}/${repo.repo}/installation`,
@@ -826,9 +939,7 @@ async function githubAppApi(
 
   const data = (await response.json()) as Json;
   if (!response.ok) {
-    throw new Error(
-      `GitHub App API ${path} failed (${response.status}): ${JSON.stringify(data)}`,
-    );
+    throw new GithubAppApiError(path, response.status, data);
   }
 
   return data;
