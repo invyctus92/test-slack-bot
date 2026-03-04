@@ -115,7 +115,7 @@ export async function POST(req: Request): Promise<Response> {
   try {
     if (event.type === "reaction_added") {
       await handleReactionAdded(event);
-    } else if (event.type === "message" && event.channel_type === "channel") {
+    } else if (event.type === "message") {
       await handleChannelThreadMessage(event);
     }
   } catch (error) {
@@ -188,13 +188,36 @@ async function handleReactionAdded(event: Json): Promise<void> {
 }
 
 async function handleChannelThreadMessage(event: Json): Promise<void> {
-  const subtype = String(event.subtype ?? "");
-  if (subtype) return;
-
-  const threadTs = String(event.thread_ts ?? "");
   const channel = String(event.channel ?? "");
-  const text = String(event.text ?? "").trim();
-  const slackUserId = String(event.user ?? "");
+  if (!channel.startsWith("C")) return;
+
+  const channelType = String(event.channel_type ?? "");
+  if (channelType && channelType !== "channel") return;
+
+  const subtype = String(event.subtype ?? "");
+  if (subtype && subtype !== "message_replied") return;
+
+  let threadTs = "";
+  let text = "";
+  let slackUserId = "";
+
+  if (!subtype) {
+    threadTs = String(event.thread_ts ?? "");
+    text = String(event.text ?? "").trim();
+    slackUserId = String(event.user ?? "");
+  } else {
+    const message = (event.message ?? {}) as Json;
+    const latestReplyTs = String(message.latest_reply ?? "");
+    const rootThreadTs = String(message.thread_ts ?? message.ts ?? "");
+    if (!latestReplyTs || !rootThreadTs) return;
+
+    const latestReply = await fetchSlackMessageWithJoin(channel, latestReplyTs);
+    if (!latestReply?.text || !latestReply.user) return;
+
+    threadTs = rootThreadTs;
+    text = latestReply.text.trim();
+    slackUserId = latestReply.user;
+  }
 
   if (!threadTs || !channel || !text || !slackUserId) return;
 
@@ -278,6 +301,15 @@ async function fetchSlackParentMessage(
   channel: string,
   ts: string,
 ): Promise<{ text?: string } | null> {
+  const message = await fetchSlackMessage(channel, ts);
+  if (!message) return null;
+  return { text: message.text };
+}
+
+async function fetchSlackMessage(
+  channel: string,
+  ts: string,
+): Promise<{ text: string; user: string } | null> {
   const response = await slackApi("conversations.history", {
     channel,
     latest: ts,
@@ -291,6 +323,7 @@ async function fetchSlackParentMessage(
   const parent = messages[0];
   return {
     text: String(parent.text ?? ""),
+    user: String(parent.user ?? ""),
   };
 }
 
@@ -298,13 +331,22 @@ async function fetchSlackParentMessageWithJoin(
   channel: string,
   ts: string,
 ): Promise<{ text?: string } | null> {
+  const message = await fetchSlackMessageWithJoin(channel, ts);
+  if (!message) return null;
+  return { text: message.text };
+}
+
+async function fetchSlackMessageWithJoin(
+  channel: string,
+  ts: string,
+): Promise<{ text: string; user: string } | null> {
   try {
-    return await fetchSlackParentMessage(channel, ts);
+    return await fetchSlackMessage(channel, ts);
   } catch (error) {
     if (isNotInChannelError(error)) {
       try {
         await joinPublicChannel(channel);
-        return await fetchSlackParentMessage(channel, ts);
+        return await fetchSlackMessage(channel, ts);
       } catch (retryError) {
         if (isChannelUnavailableError(retryError)) {
           console.warn(
