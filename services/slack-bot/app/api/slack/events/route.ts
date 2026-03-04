@@ -221,17 +221,35 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
 
   if (!threadTs || !channel || !text || !slackUserId) return;
 
+  const feedbackCommand = extractCommandPayload(text, "qa-feedback");
+  const bugCommand = extractCommandPayload(text, "qa-bug");
+  if (feedbackCommand === null && bugCommand === null) return;
+
   const parent = await fetchSlackParentMessageWithJoin(channel, threadTs);
   if (!parent?.text) return;
 
   const qa = extractQaContext(parent.text);
-  if (!qa) return;
+  if (!qa) {
+    await postSlackThreadMessage(
+      channel,
+      threadTs,
+      "Non trovo il contesto PR nel messaggio iniziale del thread. Verifica che il parent includa URL PR o marker ERGO_QA_PR_NUMBER.",
+    );
+    return;
+  }
 
   const actor = await resolveSlackUser(slackUserId);
 
-  if (text.toLowerCase().startsWith("qa-feedback:")) {
-    const feedback = text.slice("qa-feedback:".length).trim();
-    if (!feedback) return;
+  if (feedbackCommand !== null) {
+    const feedback = feedbackCommand;
+    if (!feedback) {
+      await postSlackThreadMessage(
+        channel,
+        threadTs,
+        "Formato non valido. Usa `qa-feedback: <dettagli>`.",
+      );
+      return;
+    }
 
     await removeGithubLabel(qa, "qa:approved");
     await removeGithubLabel(qa, "qa:needed");
@@ -256,9 +274,16 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
     return;
   }
 
-  if (text.toLowerCase().startsWith("qa-bug:")) {
-    const bug = text.slice("qa-bug:".length).trim();
-    if (!bug) return;
+  if (bugCommand !== null) {
+    const bug = bugCommand;
+    if (!bug) {
+      await postSlackThreadMessage(
+        channel,
+        threadTs,
+        "Formato non valido. Usa `qa-bug: <descrizione bug>`.",
+      );
+      return;
+    }
 
     const issueUrl = await createBugIssue(qa, actor, bug);
     await postSlackThreadMessage(
@@ -267,6 +292,13 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       `🐛 Issue creata: ${issueUrl}`,
     );
   }
+}
+
+function extractCommandPayload(text: string, command: string): string | null {
+  const escapedCommand = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = text.match(new RegExp(`^${escapedCommand}\\s*:\\s*(.*)$`, "i"));
+  if (!match) return null;
+  return String(match[1] ?? "").trim();
 }
 
 function verifySlackSignature(
