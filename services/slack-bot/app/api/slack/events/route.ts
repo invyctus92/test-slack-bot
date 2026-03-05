@@ -305,7 +305,7 @@ function extractCommandPayload(text: string, command: string): string | null {
 function formatSlackActorForGithub(actor: string, slackUserId: string): string {
   const normalizedActor = actor.trim();
   if (!normalizedActor || normalizedActor === slackUserId) {
-    return `Slack user ${slackUserId}`;
+    return `Utente Slack esterno/non risolvibile (${slackUserId})`;
   }
   return `${normalizedActor} (Slack ID: ${slackUserId})`;
 }
