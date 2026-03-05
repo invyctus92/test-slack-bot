@@ -239,6 +239,7 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
   }
 
   const actor = await resolveSlackUser(slackUserId);
+  const actorForGithub = formatSlackActorForGithub(actor, slackUserId);
 
   if (feedbackCommand !== null) {
     const feedback = feedbackCommand;
@@ -260,7 +261,7 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       [
         "## QA feedback from Slack",
         "",
-        `Segnalato da: @${actor}`,
+        `Segnalato da: ${actorForGithub}`,
         "",
         feedback,
       ].join("\n"),
@@ -285,7 +286,7 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       return;
     }
 
-    const issueUrl = await createBugIssue(qa, actor, bug);
+    const issueUrl = await createBugIssue(qa, actorForGithub, bug);
     await postSlackThreadMessage(
       channel,
       threadTs,
@@ -299,6 +300,14 @@ function extractCommandPayload(text: string, command: string): string | null {
   const match = text.match(new RegExp(`^${escapedCommand}\\s*:\\s*(.*)$`, "i"));
   if (!match) return null;
   return String(match[1] ?? "").trim();
+}
+
+function formatSlackActorForGithub(actor: string, slackUserId: string): string {
+  const normalizedActor = actor.trim();
+  if (!normalizedActor || normalizedActor === slackUserId) {
+    return `Slack user ${slackUserId}`;
+  }
+  return `${normalizedActor} (Slack ID: ${slackUserId})`;
 }
 
 function verifySlackSignature(
@@ -437,10 +446,21 @@ async function resolveSlackUser(userId: string): Promise<string> {
   try {
     const response = await slackApi("users.info", { user: userId });
     const user = (response.user ?? {}) as Json;
-    return String(
-      (user.profile as Json | undefined)?.display_name || user.name || userId,
+    const profile = ((user.profile as Json | undefined) ?? {}) as Json;
+    const displayName = String(
+      profile.display_name_normalized ??
+        profile.display_name ??
+        profile.real_name_normalized ??
+        profile.real_name ??
+        user.real_name ??
+        user.name ??
+        "",
+    ).trim();
+    return displayName || userId;
+  } catch (error) {
+    console.warn(
+      `Slack users.info failed for ${userId}: ${String((error as Error).message ?? error)}`,
     );
-  } catch {
     return userId;
   }
 }
@@ -533,12 +553,12 @@ async function createPrComment(qa: QaContext, body: string): Promise<void> {
 
 async function createBugIssue(
   qa: QaContext,
-  actor: string,
+  actorForGithub: string,
   bugDescription: string,
 ): Promise<string> {
   const title = `🐛 QA bug - PR #${qa.prNumber} (${qa.app})`;
   const body = [
-    `Segnalato da: @${actor}`,
+    `Segnalato da: ${actorForGithub}`,
     `PR: #${qa.prNumber}`,
     qa.prUrl ? `PR URL: ${qa.prUrl}` : null,
     qa.commit ? `Commit: ${qa.commit}` : null,
