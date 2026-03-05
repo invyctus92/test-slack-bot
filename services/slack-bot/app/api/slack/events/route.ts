@@ -444,7 +444,11 @@ async function resolveSlackUser(userId: string): Promise<string> {
   if (!userId) return "unknown";
 
   try {
-    const response = await slackApi("users.info", { user: userId });
+    const response = await slackApi(
+      "users.info",
+      { user: userId },
+      { httpMethod: "GET" },
+    );
     const user = (response.user ?? {}) as Json;
     const profile = ((user.profile as Json | undefined) ?? {}) as Json;
     const displayName = String(
@@ -606,14 +610,50 @@ async function createBugIssue(
   return issueUrl;
 }
 
-async function slackApi(method: string, body: Json): Promise<Json> {
-  const response = await fetch(`https://slack.com/api/${method}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-      "Content-Type": "application/json; charset=utf-8",
-    },
-    body: JSON.stringify(body),
+type SlackApiRequestOptions = {
+  httpMethod?: "GET" | "POST";
+};
+
+async function slackApi(
+  method: string,
+  params: Json,
+  options: SlackApiRequestOptions = {},
+): Promise<Json> {
+  const httpMethod = options.httpMethod ?? "POST";
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+  };
+
+  let url = `https://slack.com/api/${method}`;
+  let body: string | undefined;
+
+  if (httpMethod === "GET") {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === null || value === undefined) continue;
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (item === null || item === undefined) continue;
+          query.append(key, String(item));
+        }
+        continue;
+      }
+      query.set(key, String(value));
+    }
+
+    const queryString = query.toString();
+    if (queryString) {
+      url = `${url}?${queryString}`;
+    }
+  } else {
+    headers["Content-Type"] = "application/json; charset=utf-8";
+    body = JSON.stringify(params);
+  }
+
+  const response = await fetch(url, {
+    method: httpMethod,
+    headers,
+    body,
   });
 
   let data: Json = {};
