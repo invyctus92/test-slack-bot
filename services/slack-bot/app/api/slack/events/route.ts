@@ -286,11 +286,15 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       return;
     }
 
+    await removeGithubLabel(qa, "qa:approved");
+    await removeGithubLabel(qa, "qa:needed");
+    await addGithubLabels(qa, ["qa:changes-requested"]);
+
     const issueUrl = await createBugIssue(qa, actorForGithub, bug);
     await postSlackThreadMessage(
       channel,
       threadTs,
-      `🐛 Issue creata: ${issueUrl}`,
+      `🐛 Issue creata: ${issueUrl}\nLabel \`qa:changes-requested\` applicata su PR #${qa.prNumber}.`,
     );
   }
 }
