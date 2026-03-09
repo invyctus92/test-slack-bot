@@ -168,6 +168,7 @@ async function handleReactionAdded(event: Json): Promise<void> {
       [
         `❌ QA changes requested da @${actor}.`,
         "Rispondi in questo thread con: `qa-feedback: <dettagli>`",
+        "Va bene anche inviato come inline-code o code block Slack.",
         "Il bot copierà automaticamente il feedback nel PR.",
       ].join("\n"),
     );
@@ -181,6 +182,7 @@ async function handleReactionAdded(event: Json): Promise<void> {
       [
         `🐛 Bug segnalato da @${actor}.`,
         "Rispondi in questo thread con: `qa-bug: <descrizione bug>`",
+        "Va bene anche inviato come inline-code o code block Slack.",
         "Il bot creerà automaticamente una GitHub Issue con metadati artefatto.",
       ].join("\n"),
     );
@@ -247,7 +249,7 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       await postSlackThreadMessage(
         channel,
         threadTs,
-        "Formato non valido. Usa `qa-feedback: <dettagli>`.",
+        "Formato non valido. Usa `qa-feedback: <dettagli>` (anche in inline-code o code block).",
       );
       return;
     }
@@ -281,7 +283,7 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       await postSlackThreadMessage(
         channel,
         threadTs,
-        "Formato non valido. Usa `qa-bug: <descrizione bug>`.",
+        "Formato non valido. Usa `qa-bug: <descrizione bug>` (anche in inline-code o code block).",
       );
       return;
     }
@@ -301,9 +303,40 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
 
 function extractCommandPayload(text: string, command: string): string | null {
   const escapedCommand = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = text.match(new RegExp(`^${escapedCommand}\\s*:\\s*(.*)$`, "i"));
-  if (!match) return null;
-  return String(match[1] ?? "").trim();
+  const commandRegex = new RegExp(
+    `^${escapedCommand}\\s*:\\s*([\\s\\S]*)$`,
+    "i",
+  );
+
+  for (const candidate of buildCommandTextCandidates(text)) {
+    const match = candidate.match(commandRegex);
+    if (match) {
+      return String(match[1] ?? "").trim();
+    }
+  }
+
+  return null;
+}
+
+function buildCommandTextCandidates(text: string): string[] {
+  const normalized = text.trim();
+  if (!normalized) return [];
+
+  const candidates = [normalized];
+
+  const tripleBacktickMatch = normalized.match(
+    /^```(?:[a-zA-Z0-9_-]+)?\n?([\s\S]*?)\n?```$/,
+  );
+  if (tripleBacktickMatch?.[1]) {
+    candidates.push(tripleBacktickMatch[1].trim());
+  }
+
+  const singleBacktickMatch = normalized.match(/^`([\s\S]+)`$/);
+  if (singleBacktickMatch?.[1]) {
+    candidates.push(singleBacktickMatch[1].trim());
+  }
+
+  return [...new Set(candidates)];
 }
 
 function formatSlackActorForGithub(actor: string, slackUserId: string): string {
