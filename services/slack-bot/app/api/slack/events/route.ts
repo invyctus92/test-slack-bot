@@ -224,29 +224,11 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
   if (channelType && channelType !== "channel") return;
 
   const subtype = String(event.subtype ?? "");
-  if (subtype && subtype !== "message_replied") return;
+  if (subtype) return;
 
-  let threadTs = "";
-  let text = "";
-  let slackUserId = "";
-
-  if (!subtype) {
-    threadTs = String(event.thread_ts ?? "");
-    text = String(event.text ?? "").trim();
-    slackUserId = String(event.user ?? "");
-  } else {
-    const message = (event.message ?? {}) as Json;
-    const latestReplyTs = String(message.latest_reply ?? "");
-    const rootThreadTs = String(message.thread_ts ?? message.ts ?? "");
-    if (!latestReplyTs || !rootThreadTs) return;
-
-    const latestReply = await fetchSlackMessageWithJoin(channel, latestReplyTs);
-    if (!latestReply?.text || !latestReply.user) return;
-
-    threadTs = rootThreadTs;
-    text = latestReply.text.trim();
-    slackUserId = latestReply.user;
-  }
+  const threadTs = String(event.thread_ts ?? "");
+  const text = String(event.text ?? "").trim();
+  const slackUserId = String(event.user ?? "");
 
   if (!threadTs || !channel || !text || !slackUserId) return;
 
