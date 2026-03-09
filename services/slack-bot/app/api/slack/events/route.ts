@@ -26,12 +26,14 @@ class SlackApiError extends Error {
 class GithubAppApiError extends Error {
   readonly status: number;
   readonly path: string;
+  readonly data: Json;
 
   constructor(path: string, status: number, data: Json) {
     super(`GitHub App API ${path} failed (${status}): ${JSON.stringify(data)}`);
     this.name = "GithubAppApiError";
     this.status = status;
     this.path = path;
+    this.data = data;
   }
 }
 
@@ -60,6 +62,7 @@ const GITHUB_APP_INSTALLATION_ID = (
 ).trim();
 const DEFAULT_GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY ?? "";
 const GITHUB_API_VERSION = "2022-11-28";
+const GITHUB_ISSUE_TITLE_MAX_LENGTH = 256;
 let githubAppPrivateKey: crypto.KeyObject | null = null;
 const githubInstallationTokenCache = new Map<
   string,
@@ -145,9 +148,21 @@ async function handleReactionAdded(event: Json): Promise<void> {
   if (
     ["white_check_mark", "heavy_check_mark", "check_mark"].includes(reaction)
   ) {
-    await removeGithubLabel(qa, "qa:needed");
-    await removeGithubLabel(qa, "qa:changes-requested");
-    await addGithubLabels(qa, ["qa:approved"]);
+    try {
+      await removeGithubLabel(qa, "qa:needed");
+      await removeGithubLabel(qa, "qa:changes-requested");
+      await addGithubLabels(qa, ["qa:approved"]);
+    } catch (error) {
+      if (isGithubIssuesDisabledError(error)) {
+        await postSlackThreadMessage(
+          channel,
+          ts,
+          "⚠️ Non posso aggiornare label QA su GitHub: le Issues sono disabilitate su questo repository.",
+        );
+        return;
+      }
+      throw error;
+    }
 
     await postSlackThreadMessage(
       channel,
@@ -158,9 +173,21 @@ async function handleReactionAdded(event: Json): Promise<void> {
   }
 
   if (reaction === "x") {
-    await removeGithubLabel(qa, "qa:approved");
-    await removeGithubLabel(qa, "qa:needed");
-    await addGithubLabels(qa, ["qa:changes-requested"]);
+    try {
+      await removeGithubLabel(qa, "qa:approved");
+      await removeGithubLabel(qa, "qa:needed");
+      await addGithubLabels(qa, ["qa:changes-requested"]);
+    } catch (error) {
+      if (isGithubIssuesDisabledError(error)) {
+        await postSlackThreadMessage(
+          channel,
+          ts,
+          "⚠️ Non posso aggiornare label QA su GitHub: le Issues sono disabilitate su questo repository.",
+        );
+        return;
+      }
+      throw error;
+    }
 
     await postSlackThreadMessage(
       channel,
@@ -254,20 +281,32 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       return;
     }
 
-    await removeGithubLabel(qa, "qa:approved");
-    await removeGithubLabel(qa, "qa:needed");
-    await addGithubLabels(qa, ["qa:changes-requested"]);
+    try {
+      await removeGithubLabel(qa, "qa:approved");
+      await removeGithubLabel(qa, "qa:needed");
+      await addGithubLabels(qa, ["qa:changes-requested"]);
 
-    await createPrComment(
-      qa,
-      [
-        "## QA feedback from Slack",
-        "",
-        `Segnalato da: ${actorForGithub}`,
-        "",
-        feedback,
-      ].join("\n"),
-    );
+      await createPrComment(
+        qa,
+        [
+          "## QA feedback from Slack",
+          "",
+          `Segnalato da: ${actorForGithub}`,
+          "",
+          feedback,
+        ].join("\n"),
+      );
+    } catch (error) {
+      if (isGithubIssuesDisabledError(error)) {
+        await postSlackThreadMessage(
+          channel,
+          threadTs,
+          "⚠️ Non posso copiare il feedback nel PR: le Issues sono disabilitate su questo repository.",
+        );
+        return;
+      }
+      throw error;
+    }
 
     await postSlackThreadMessage(
       channel,
@@ -288,11 +327,49 @@ async function handleChannelThreadMessage(event: Json): Promise<void> {
       return;
     }
 
-    await removeGithubLabel(qa, "qa:approved");
-    await removeGithubLabel(qa, "qa:needed");
-    await addGithubLabels(qa, ["qa:changes-requested"]);
+    try {
+      await removeGithubLabel(qa, "qa:approved");
+      await removeGithubLabel(qa, "qa:needed");
+      await addGithubLabels(qa, ["qa:changes-requested"]);
+    } catch (error) {
+      if (isGithubIssuesDisabledError(error)) {
+        await postSlackThreadMessage(
+          channel,
+          threadTs,
+          "⚠️ Non posso aggiornare label QA su GitHub: le Issues sono disabilitate su questo repository.",
+        );
+        return;
+      }
+      throw error;
+    }
 
-    const issueUrl = await createBugIssue(qa, actorForGithub, bug);
+    let issueUrl = "";
+    try {
+      issueUrl = await createBugIssue(qa, actorForGithub, bug);
+    } catch (error) {
+      if (isGithubIssuesDisabledError(error)) {
+        await postSlackThreadMessage(
+          channel,
+          threadTs,
+          [
+            "⚠️ Non posso creare la GitHub Issue: le Issues sono disabilitate su questo repository.",
+            `Label \`qa:changes-requested\` applicata su PR #${qa.prNumber}.`,
+            "Per proseguire, abilita Issues nel repository o usa `qa-feedback:` per lasciare feedback nel PR.",
+          ].join("\n"),
+        );
+        return;
+      }
+      if (isGithubIssueTitleTooLongError(error)) {
+        await postSlackThreadMessage(
+          channel,
+          threadTs,
+          "⚠️ Non posso creare la GitHub Issue: titolo non valido/troppo lungo. Riprova con un contesto QA più corto o usa `qa-feedback:`.",
+        );
+        return;
+      }
+      throw error;
+    }
+
     await postSlackThreadMessage(
       channel,
       threadTs,
@@ -575,6 +652,9 @@ async function removeGithubLabel(qa: QaContext, name: string): Promise<void> {
       },
     );
   } catch (error) {
+    if (error instanceof GithubAppApiError && error.status === 404) {
+      return;
+    }
     if (error instanceof Error && error.message.includes("404")) {
       return;
     }
@@ -597,7 +677,7 @@ async function createBugIssue(
   actorForGithub: string,
   bugDescription: string,
 ): Promise<string> {
-  const title = `🐛 QA bug - PR #${qa.prNumber} (${qa.app})`;
+  const title = buildBugIssueTitle(qa);
   const body = [
     `Segnalato da: ${actorForGithub}`,
     `PR: #${qa.prNumber}`,
@@ -645,6 +725,30 @@ async function createBugIssue(
   }
 
   return issueUrl;
+}
+
+function buildBugIssueTitle(qa: QaContext): string {
+  const prefix = `🐛 QA bug - PR #${qa.prNumber}`;
+  const app = String(qa.app ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!app) {
+    return prefix.slice(0, GITHUB_ISSUE_TITLE_MAX_LENGTH);
+  }
+
+  const maxAppLength =
+    GITHUB_ISSUE_TITLE_MAX_LENGTH - (prefix.length + " ()".length);
+  if (maxAppLength <= 0) {
+    return prefix.slice(0, GITHUB_ISSUE_TITLE_MAX_LENGTH);
+  }
+
+  const safeApp = app.slice(0, maxAppLength).trim();
+  if (!safeApp) {
+    return prefix.slice(0, GITHUB_ISSUE_TITLE_MAX_LENGTH);
+  }
+
+  return `${prefix} (${safeApp})`;
 }
 
 type SlackApiRequestOptions = {
@@ -745,12 +849,42 @@ async function githubApi(
   const data = (await response.json()) as Json;
 
   if (!response.ok) {
-    throw new Error(
-      `GitHub API ${path} failed (${response.status}): ${JSON.stringify(data)}`,
-    );
+    throw new GithubAppApiError(path, response.status, data);
   }
 
   return data;
+}
+
+function isGithubIssuesDisabledError(error: unknown): boolean {
+  if (error instanceof GithubAppApiError) {
+    if (error.status !== 410) return false;
+    const message = String(error.data.message ?? "");
+    return message.includes("Issues has been disabled in this repository.");
+  }
+
+  if (!(error instanceof Error)) return false;
+  return error.message.includes("Issues has been disabled in this repository.");
+}
+
+function isGithubIssueTitleTooLongError(error: unknown): boolean {
+  if (error instanceof GithubAppApiError) {
+    if (error.status !== 422) return false;
+
+    const errors = error.data.errors;
+    if (!Array.isArray(errors)) return false;
+
+    return errors.some((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const issueError = entry as Json;
+      const field = String(issueError.field ?? "");
+      const message = String(issueError.message ?? "").toLowerCase();
+
+      return field === "title" && message.includes("too long");
+    });
+  }
+
+  if (!(error instanceof Error)) return false;
+  return error.message.toLowerCase().includes("title is too long");
 }
 
 async function getGithubInstallationTokenForPath(
